@@ -54,7 +54,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/gpujs/gpu.js.git"
+    "url": "git+https://github.com/victorequena22/gpu.js.git"
   },
   "keywords": [
     "gpgpu",
@@ -63,7 +63,7 @@
   "author": "The gpu.js Team",
   "license": "MIT",
   "bugs": {
-    "url": "https://github.com/gpujs/gpu.js/issues"
+    "url": "https://github.com/victorequena22/gpu.js/issues"
   },
   "homepage": "http://gpu.rocks/",
   "typings": "./src/index.d.ts"
