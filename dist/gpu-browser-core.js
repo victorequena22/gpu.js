@@ -1,11 +1,11 @@
 /**
- * gpu.js
+ * @victorequena22/gpu.js
  * http://gpu.rocks/
  *
  * GPU Accelerated JavaScript
  *
- * @version 2.16.0
- * @date Fri Mar 08 2024 23:30:02 GMT-0400 (hora de Venezuela)
+ * @version 2.16.1
+ * @date Fri Oct 04 2024 21:54:12 GMT-0400 (hora de Venezuela)
  *
  * @license MIT
  * The MIT License
@@ -14,7 +14,6 @@
  */(function(f){if(typeof exports==="object"&&typeof module!=="undefined"){module.exports=f()}else if(typeof define==="function"&&define.amd){define([],f)}else{var g;if(typeof window!=="undefined"){g=window}else if(typeof global!=="undefined"){g=global}else if(typeof self!=="undefined"){g=self}else{g=this}g.GPU = f()}})(function(){var define,module,exports;return (function(){function r(e,n,t){function o(i,f){if(!n[i]){if(!e[i]){var c="function"==typeof require&&require;if(!f&&c)return c(i,!0);if(u)return u(i,!0);var a=new Error("Cannot find module '"+i+"'");throw a.code="MODULE_NOT_FOUND",a}var p=n[i]={exports:{}};e[i][0].call(p.exports,function(r){var n=e[i][1][r];return o(n||r)},p,p.exports,r,e,n,t)}return n[i].exports}for(var u="function"==typeof require&&require,i=0;i<t.length;i++)o(t[i]);return o}return r})()({1:[function(require,module,exports){
 
 },{}],2:[function(require,module,exports){
-
 function glWiretap(gl, options = {}) {
   const {
     contextName = 'gl',
@@ -46,6 +45,595 @@ function glWiretap(gl, options = {}) {
     }
     if (typeof gl[property] === 'function') {
       return function() { 
+        switch (property) {
+          case 'getError':
+            if (throwGetError) {
+              recording.push(`${indent}if (${contextName}.getError() !== ${contextName}.NONE) throw new Error('error');`);
+            } else {
+              recording.push(`${indent}${contextName}.getError();`); 
+            }
+            return gl.getError();
+          case 'getExtension': {
+            const variableName = `${contextName}Variables${contextVariables.length}`;
+            recording.push(`${indent}const ${variableName} = ${contextName}.getExtension('${arguments[0]}');`);
+            const extension = gl.getExtension(arguments[0]);
+            if (extension && typeof extension === 'object') {
+              const tappedExtension = glExtensionWiretap(extension, {
+                getEntity,
+                useTrackablePrimitives,
+                recording,
+                contextName: variableName,
+                contextVariables,
+                variables,
+                indent,
+                onUnrecognizedArgumentLookup,
+              });
+              contextVariables.push(tappedExtension);
+              return tappedExtension;
+            } else {
+              contextVariables.push(null);
+            }
+            return extension;
+          }
+          case 'readPixels':
+            const i = contextVariables.indexOf(arguments[6]);
+            let targetVariableName;
+            if (i === -1) {
+              const variableName = getVariableName(arguments[6]);
+              if (variableName) {
+                targetVariableName = variableName;
+                recording.push(`${indent}${variableName}`);
+              } else {
+                targetVariableName = `${contextName}Variable${contextVariables.length}`;
+                contextVariables.push(arguments[6]);
+                recording.push(`${indent}const ${targetVariableName} = new ${arguments[6].constructor.name}(${arguments[6].length});`);
+              }
+            } else {
+              targetVariableName = `${contextName}Variable${i}`;
+            }
+            readPixelsVariableName = targetVariableName;
+            const argumentAsStrings = [
+              arguments[0],
+              arguments[1],
+              arguments[2],
+              arguments[3],
+              getEntity(arguments[4]),
+              getEntity(arguments[5]),
+              targetVariableName
+            ];
+            recording.push(`${indent}${contextName}.readPixels(${argumentAsStrings.join(', ')});`);
+            if (readPixelsFile) {
+              writePPM(arguments[2], arguments[3]);
+            }
+            if (onReadPixels) {
+              onReadPixels(targetVariableName, argumentAsStrings);
+            }
+            return gl.readPixels.apply(gl, arguments);
+          case 'drawBuffers':
+            recording.push(`${indent}${contextName}.drawBuffers([${argumentsToString(arguments[0], { contextName, contextVariables, getEntity, addVariable, variables, onUnrecognizedArgumentLookup } )}]);`);
+            return gl.drawBuffers(arguments[0]);
+        }
+        let result = gl[property].apply(gl, arguments);
+        switch (typeof result) {
+          case 'undefined':
+            recording.push(`${indent}${methodCallToString(property, arguments)};`);
+            return;
+          case 'number':
+          case 'boolean':
+            if (useTrackablePrimitives && contextVariables.indexOf(trackablePrimitive(result)) === -1) {
+              recording.push(`${indent}const ${contextName}Variable${contextVariables.length} = ${methodCallToString(property, arguments)};`);
+              contextVariables.push(result = trackablePrimitive(result));
+              break;
+            }
+          default:
+            if (result === null) {
+              recording.push(`${methodCallToString(property, arguments)};`);
+            } else {
+              recording.push(`${indent}const ${contextName}Variable${contextVariables.length} = ${methodCallToString(property, arguments)};`);
+            }
+
+            contextVariables.push(result);
+        }
+        return result;
+      }
+    }
+    entityNames[gl[property]] = property;
+    return gl[property];
+  }
+  function toString() {
+    return recording.join('\n');
+  }
+  function reset() {
+    while (recording.length > 0) {
+      recording.pop();
+    }
+  }
+  function insertVariable(name, value) {
+    variables[name] = value;
+  }
+  function getEntity(value) {
+    const name = entityNames[value];
+    if (name) {
+      return contextName + '.' + name;
+    }
+    return value;
+  }
+  function setIndent(spaces) {
+    indent = ' '.repeat(spaces);
+  }
+  function addVariable(value, source) {
+    const variableName = `${contextName}Variable${contextVariables.length}`;
+    recording.push(`${indent}const ${variableName} = ${source};`);
+    contextVariables.push(value);
+    return variableName;
+  }
+  function writePPM(width, height) {
+    const sourceVariable = `${contextName}Variable${contextVariables.length}`;
+    const imageVariable = `imageDatum${imageCount}`;
+    recording.push(`${indent}let ${imageVariable} = ["P3\\n# ${readPixelsFile}.ppm\\n", ${width}, ' ', ${height}, "\\n255\\n"].join("");`);
+    recording.push(`${indent}for (let i = 0; i < ${imageVariable}.length; i += 4) {`);
+    recording.push(`${indent}  ${imageVariable} += ${sourceVariable}[i] + ' ' + ${sourceVariable}[i + 1] + ' ' + ${sourceVariable}[i + 2] + ' ';`);
+    recording.push(`${indent}}`);
+    recording.push(`${indent}if (typeof require !== "undefined") {`);
+    recording.push(`${indent}  require('fs').writeFileSync('./${readPixelsFile}.ppm', ${imageVariable});`);
+    recording.push(`${indent}}`);
+    imageCount++;
+  }
+  function addComment(value) {
+    recording.push(`${indent}// ${value}`);
+  }
+  function checkThrowError() {
+    recording.push(`${indent}(() => {
+${indent}const error = ${contextName}.getError();
+${indent}if (error !== ${contextName}.NONE) {
+${indent}  const names = Object.getOwnPropertyNames(gl);
+${indent}  for (let i = 0; i < names.length; i++) {
+${indent}    const name = names[i];
+${indent}    if (${contextName}[name] === error) {
+${indent}      throw new Error('${contextName} threw ' + name);
+${indent}    }
+${indent}  }
+${indent}}
+${indent}})();`);
+  }
+  function methodCallToString(method, args) {
+    return `${contextName}.${method}(${argumentsToString(args, { contextName, contextVariables, getEntity, addVariable, variables, onUnrecognizedArgumentLookup })})`;
+  }
+
+  function getVariableName(value) {
+    if (variables) {
+      for (const name in variables) {
+        if (variables[name] === value) {
+          return name;
+        }
+      }
+    }
+    return null;
+  }
+
+  function getContextVariableName(value) {
+    const i = contextVariables.indexOf(value);
+    if (i !== -1) {
+      return `${contextName}Variable${i}`;
+    }
+    return null;
+  }
+}
+
+function glExtensionWiretap(extension, options) {
+  const proxy = new Proxy(extension, { get: listen });
+  const extensionEntityNames = {};
+  const {
+    contextName,
+    contextVariables,
+    getEntity,
+    useTrackablePrimitives,
+    recording,
+    variables,
+    indent,
+    onUnrecognizedArgumentLookup,
+  } = options;
+  return proxy;
+  function listen(obj, property) {
+    if (typeof obj[property] === 'function') {
+      return function() {
+        switch (property) {
+          case 'drawBuffersWEBGL':
+            recording.push(`${indent}${contextName}.drawBuffersWEBGL([${argumentsToString(arguments[0], { contextName, contextVariables, getEntity: getExtensionEntity, addVariable, variables, onUnrecognizedArgumentLookup })}]);`);
+            return extension.drawBuffersWEBGL(arguments[0]);
+        }
+        let result = extension[property].apply(extension, arguments);
+        switch (typeof result) {
+          case 'undefined':
+            recording.push(`${indent}${methodCallToString(property, arguments)};`);
+            return;
+          case 'number':
+          case 'boolean':
+            if (useTrackablePrimitives && contextVariables.indexOf(trackablePrimitive(result)) === -1) {
+              recording.push(`${indent}const ${contextName}Variable${contextVariables.length} = ${methodCallToString(property, arguments)};`);
+              contextVariables.push(result = trackablePrimitive(result));
+            } else {
+              recording.push(`${indent}const ${contextName}Variable${contextVariables.length} = ${methodCallToString(property, arguments)};`);
+              contextVariables.push(result);
+            }
+            break;
+          default:
+            if (result === null) {
+              recording.push(`${methodCallToString(property, arguments)};`);
+            } else {
+              recording.push(`${indent}const ${contextName}Variable${contextVariables.length} = ${methodCallToString(property, arguments)};`);
+            }
+            contextVariables.push(result);
+        }
+        return result;
+      };
+    }
+    extensionEntityNames[extension[property]] = property;
+    return extension[property];
+  }
+
+  function getExtensionEntity(value) {
+    if (extensionEntityNames.hasOwnProperty(value)) {
+      return `${contextName}.${extensionEntityNames[value]}`;
+    }
+    return getEntity(value);
+  }
+
+  function methodCallToString(method, args) {
+    return `${contextName}.${method}(${argumentsToString(args, { contextName, contextVariables, getEntity: getExtensionEntity, addVariable, variables, onUnrecognizedArgumentLookup })})`;
+  }
+
+  function addVariable(value, source) {
+    const variableName = `${contextName}Variable${contextVariables.length}`;
+    contextVariables.push(value);
+    recording.push(`${indent}const ${variableName} = ${source};`);
+    return variableName;
+  }
+}
+
+function argumentsToString(args, options) {
+  const { variables, onUnrecognizedArgumentLookup } = options;
+  return (Array.from(args).map((arg) => {
+    const variableName = getVariableName(arg);
+    if (variableName) {
+      return variableName;
+    }
+    return argumentToString(arg, options);
+  }).join(', '));
+
+  function getVariableName(value) {
+    if (variables) {
+      for (const name in variables) {
+        if (!variables.hasOwnProperty(name)) continue;
+        if (variables[name] === value) {
+          return name;
+        }
+      }
+    }
+    if (onUnrecognizedArgumentLookup) {
+      return onUnrecognizedArgumentLookup(value);
+    }
+    return null;
+  }
+}
+
+function argumentToString(arg, options) {
+  const { contextName, contextVariables, getEntity, addVariable, onUnrecognizedArgumentLookup } = options;
+  if (typeof arg === 'undefined') {
+    return 'undefined';
+  }
+  if (arg === null) {
+    return 'null';
+  }
+  const i = contextVariables.indexOf(arg);
+  if (i > -1) {
+    return `${contextName}Variable${i}`;
+  }
+  switch (arg.constructor.name) {
+    case 'String':
+      const hasLines = /\n/.test(arg);
+      const hasSingleQuotes = /'/.test(arg);
+      const hasDoubleQuotes = /"/.test(arg);
+      if (hasLines) {
+        return '`' + arg + '`';
+      } else if (hasSingleQuotes && !hasDoubleQuotes) {
+        return '"' + arg + '"';
+      } else if (!hasSingleQuotes && hasDoubleQuotes) {
+        return "'" + arg + "'";
+      } else {
+        return '\'' + arg + '\'';
+      }
+    case 'Number': return getEntity(arg);
+    case 'Boolean': return getEntity(arg);
+    case 'Array':
+      return addVariable(arg, `new ${arg.constructor.name}([${Array.from(arg).join(',')}])`);
+    case 'Float32Array':
+    case 'Uint8Array':
+    case 'Uint16Array':
+    case 'Int32Array':
+      return addVariable(arg, `new ${arg.constructor.name}(${JSON.stringify(Array.from(arg))})`);
+    default:
+      if (onUnrecognizedArgumentLookup) {
+        const instantiationString = onUnrecognizedArgumentLookup(arg);
+        if (instantiationString) {
+          return instantiationString;
+        }
+      }
+      throw new Error(`unrecognized argument type ${arg.constructor.name}`);
+  }
+}
+
+function trackablePrimitive(value) {
+  return new value.constructor(value);
+}
+
+if (typeof module !== 'undefined') {
+  module.exports = { glWiretap, glExtensionWiretap };
+}
+
+if (typeof window !== 'undefined') {
+  glWiretap.glExtensionWiretap = glExtensionWiretap;
+  window.glWiretap = glWiretap;
+}
+
+},{}],3:[function(require,module,exports){
+function setupArguments(args) {
+  const newArguments = new Array(args.length);
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i];
+    if (arg.toArray) {
+      newArguments[i] = arg.toArray();
+    } else {
+      newArguments[i] = arg;
+    }
+  }
+  return newArguments;
+}
+
+function mock1D() {
+  const args = setupArguments(arguments);
+  const row = new Float32Array(this.output.x);
+  for (let x = 0; x < this.output.x; x++) {
+    this.thread.x = x;
+    this.thread.y = 0;
+    this.thread.z = 0;
+    row[x] = this._fn.apply(this, args);
+  }
+  return row;
+}
+
+function mock2D() {
+  const args = setupArguments(arguments);
+  const matrix = new Array(this.output.y);
+  for (let y = 0; y < this.output.y; y++) {
+    const row = new Float32Array(this.output.x);
+    for (let x = 0; x < this.output.x; x++) {
+      this.thread.x = x;
+      this.thread.y = y;
+      this.thread.z = 0;
+      row[x] = this._fn.apply(this, args);
+    }
+    matrix[y] = row;
+  }
+  return matrix;
+}
+
+function mock2DGraphical() {
+  const args = setupArguments(arguments);
+  for (let y = 0; y < this.output.y; y++) {
+    for (let x = 0; x < this.output.x; x++) {
+      this.thread.x = x;
+      this.thread.y = y;
+      this.thread.z = 0;
+      this._fn.apply(this, args);
+    }
+  }
+}
+
+function mock3D() {
+  const args = setupArguments(arguments);
+  const cube = new Array(this.output.z);
+  for (let z = 0; z < this.output.z; z++) {
+    const matrix = new Array(this.output.y);
+    for (let y = 0; y < this.output.y; y++) {
+      const row = new Float32Array(this.output.x);
+      for (let x = 0; x < this.output.x; x++) {
+        this.thread.x = x;
+        this.thread.y = y;
+        this.thread.z = z;
+        row[x] = this._fn.apply(this, args);
+      }
+      matrix[y] = row;
+    }
+    cube[z] = matrix;
+  }
+  return cube;
+}
+
+function apiDecorate(kernel) {
+  kernel.setOutput = (output) => {
+    kernel.output = setupOutput(output);
+    if (kernel.graphical) {
+      setupGraphical(kernel);
+    }
+  };
+  kernel.toJSON = () => {
+    throw new Error('Not usable with gpuMock');
+  };
+  kernel.setConstants = (flag) => {
+    kernel.constants = flag;
+    return kernel;
+  };
+  kernel.setGraphical = (flag) => {
+    kernel.graphical = flag;
+    return kernel;
+  };
+  kernel.setCanvas = (flag) => {
+    kernel.canvas = flag;
+    return kernel;
+  };
+  kernel.setContext = (flag) => {
+    kernel.context = flag;
+    return kernel;
+  };
+  kernel.destroy = () => {};
+  kernel.validateSettings = () => {};
+  if (kernel.graphical && kernel.output) {
+    setupGraphical(kernel);
+  }
+  kernel.exec = function() {
+    return new Promise((resolve, reject) => {
+      try {
+        resolve(kernel.apply(kernel, arguments));
+      } catch(e) {
+        reject(e);
+      }
+    });
+  };
+  kernel.getPixels = (flip) => {
+    const {x, y} = kernel.output;
+    return flip ? flipPixels(kernel._imageData.data, x, y) : kernel._imageData.data.slice(0);
+  };
+  kernel.color = function(r, g, b, a) {
+    if (typeof a === 'undefined') {
+      a = 1;
+    }
+
+    r = Math.floor(r * 255);
+    g = Math.floor(g * 255);
+    b = Math.floor(b * 255);
+    a = Math.floor(a * 255);
+
+    const width = kernel.output.x;
+    const height = kernel.output.y;
+
+    const x = kernel.thread.x;
+    const y = height - kernel.thread.y - 1;
+
+    const index = x + y * width;
+
+    kernel._colorData[index * 4 + 0] = r;
+    kernel._colorData[index * 4 + 1] = g;
+    kernel._colorData[index * 4 + 2] = b;
+    kernel._colorData[index * 4 + 3] = a;
+  };
+
+  const mockMethod = () => kernel;
+  const methods = [
+    'setWarnVarUsage',
+    'setArgumentTypes',
+    'setTactic',
+    'setOptimizeFloatMemory',
+    'setDebug',
+    'setLoopMaxIterations',
+    'setConstantTypes',
+    'setFunctions',
+    'setNativeFunctions',
+    'setInjectedNative',
+    'setPipeline',
+    'setPrecision',
+    'setOutputToTexture',
+    'setImmutable',
+    'setStrictIntegers',
+    'setDynamicOutput',
+    'setHardcodeConstants',
+    'setDynamicArguments',
+    'setUseLegacyEncoder',
+    'setWarnVarUsage',
+    'addSubKernel',
+  ];
+  for (let i = 0; i < methods.length; i++) {
+    kernel[methods[i]] = mockMethod;
+  }
+  return kernel;
+}
+
+function setupGraphical(kernel) {
+  const {x, y} = kernel.output;
+  if (kernel.context && kernel.context.createImageData) {
+    const data = new Uint8ClampedArray(x * y * 4);
+    kernel._imageData = kernel.context.createImageData(x, y);
+    kernel._colorData = data;
+  } else {
+    const data = new Uint8ClampedArray(x * y * 4);
+    kernel._imageData = { data };
+    kernel._colorData = data;
+  }
+}
+
+function setupOutput(output) {
+  let result = null;
+  if (output.length) {
+    if (output.length === 3) {
+      const [x,y,z] = output;
+      result = { x, y, z };
+    } else if (output.length === 2) {
+      const [x,y] = output;
+      result = { x, y };
+    } else {
+      const [x] = output;
+      result = { x };
+    }
+  } else {
+    result = output;
+  }
+  return result;
+}
+
+function gpuMock(fn, settings = {}) {
+  const output = settings.output ? setupOutput(settings.output) : null;
+  function kernel() {
+    if (kernel.output.z) {
+      return mock3D.apply(kernel, arguments);
+    } else if (kernel.output.y) {
+      if (kernel.graphical) {
+        return mock2DGraphical.apply(kernel, arguments);
+      }
+      return mock2D.apply(kernel, arguments);
+    } else {
+      return mock1D.apply(kernel, arguments);
+    }
+  }
+  kernel._fn = fn;
+  kernel.constants = settings.constants || null;
+  kernel.context = settings.context || null;
+  kernel.canvas = settings.canvas || null;
+  kernel.graphical = settings.graphical || false;
+  kernel._imageData = null;
+  kernel._colorData = null;
+  kernel.output = output;
+  kernel.thread = {
+    x: 0,
+    y: 0,
+    z: 0
+  };
+  return apiDecorate(kernel);
+}
+
+function flipPixels(pixels, width, height) {
+  const halfHeight = height / 2 | 0; 
+  const bytesPerRow = width * 4;
+  const temp = new Uint8ClampedArray(width * 4);
+  const result = pixels.slice(0);
+  for (let y = 0; y < halfHeight; ++y) {
+    const topOffset = y * bytesPerRow;
+    const bottomOffset = (height - y - 1) * bytesPerRow;
+
+    temp.set(result.subarray(topOffset, topOffset + bytesPerRow));
+
+    result.copyWithin(topOffset, bottomOffset, bottomOffset + bytesPerRow);
+
+    result.set(temp, bottomOffset);
+  }
+  return result;
+}
+
+module.exports = {
+  gpuMock
+};
+
+},{}],4:[function(require,module,exports){
+const { utils } = require('./utils');
 
 function alias(name, source) {
   const fnString = source.toString();
@@ -1426,7 +2014,6 @@ module.exports = {
   CPUKernel
 };
 },{"../../utils":113,"../function-builder":8,"../kernel":35,"./function-node":5,"./kernel-string":6}],8:[function(require,module,exports){
-
 class FunctionBuilder {
   static fromKernel(kernel, FunctionNode, extraNodeOptions) {
     const {
@@ -2294,191 +2881,191 @@ class FunctionNode {
         } else {
           return 'Number';
         }
-        case 'AssignmentExpression':
-          return this.getType(ast.left);
-        case 'CallExpression':
-          if (this.isAstMathFunction(ast)) {
-            return 'Number';
-          }
-          if (!ast.callee || !ast.callee.name) {
-            if (ast.callee.type === 'SequenceExpression' && ast.callee.expressions[ast.callee.expressions.length - 1].property.name) {
-              const functionName = ast.callee.expressions[ast.callee.expressions.length - 1].property.name;
-              this.inferArgumentTypesIfNeeded(functionName, ast.arguments);
-              return this.lookupReturnType(functionName, ast, this);
-            }
-            if (this.getVariableSignature(ast.callee, true) === 'this.color') {
-              return null;
-            }
-            if (ast.callee.type === 'MemberExpression' && ast.callee.object && ast.callee.property && ast.callee.property.name && ast.arguments) {
-              const functionName = ast.callee.property.name;
-              this.inferArgumentTypesIfNeeded(functionName, ast.arguments);
-              return this.lookupReturnType(functionName, ast, this);
-            }
-            throw this.astErrorOutput('Unknown call expression', ast);
-          }
-          if (ast.callee && ast.callee.name) {
-            const functionName = ast.callee.name;
+      case 'AssignmentExpression':
+        return this.getType(ast.left);
+      case 'CallExpression':
+        if (this.isAstMathFunction(ast)) {
+          return 'Number';
+        }
+        if (!ast.callee || !ast.callee.name) {
+          if (ast.callee.type === 'SequenceExpression' && ast.callee.expressions[ast.callee.expressions.length - 1].property.name) {
+            const functionName = ast.callee.expressions[ast.callee.expressions.length - 1].property.name;
             this.inferArgumentTypesIfNeeded(functionName, ast.arguments);
             return this.lookupReturnType(functionName, ast, this);
           }
-          throw this.astErrorOutput(`Unhandled getType Type "${ ast.type }"`, ast);
-        case 'LogicalExpression':
-          return 'Boolean';
-        case 'BinaryExpression':
-          switch (ast.operator) {
-            case '%':
-            case '/':
-              if (this.fixIntegerDivisionAccuracy) {
-                return 'Number';
-              } else {
-                break;
-              }
-              case '>':
-              case '<':
-                return 'Boolean';
-              case '&':
-              case '|':
-              case '^':
-              case '<<':
-              case '>>':
-              case '>>>':
-                return 'Integer';
+          if (this.getVariableSignature(ast.callee, true) === 'this.color') {
+            return null;
           }
-          const type = this.getType(ast.left);
-          if (this.isState('skip-literal-correction')) return type;
-          if (type === 'LiteralInteger') {
-            const rightType = this.getType(ast.right);
-            if (rightType === 'LiteralInteger') {
-              if (ast.left.value % 1 === 0) {
-                return 'Integer';
-              } else {
-                return 'Float';
-              }
-            }
-            return rightType;
+          if (ast.callee.type === 'MemberExpression' && ast.callee.object && ast.callee.property && ast.callee.property.name && ast.arguments) {
+            const functionName = ast.callee.property.name;
+            this.inferArgumentTypesIfNeeded(functionName, ast.arguments);
+            return this.lookupReturnType(functionName, ast, this);
           }
-          return typeLookupMap[type] || type;
-        case 'UpdateExpression':
-          return this.getType(ast.argument);
-        case 'UnaryExpression':
-          if (ast.operator === '~') {
-            return 'Integer';
-          }
-          return this.getType(ast.argument);
-        case 'VariableDeclaration': {
-          const declarations = ast.declarations;
-          let lastType;
-          for (let i = 0; i < declarations.length; i++) {
-            const declaration = declarations[i];
-            lastType = this.getType(declaration);
-          }
-          if (!lastType) {
-            throw this.astErrorOutput(`Unable to find type for declaration`, ast);
-          }
-          return lastType;
+          throw this.astErrorOutput('Unknown call expression', ast);
         }
-        case 'VariableDeclarator':
-          const declaration = this.getDeclaration(ast.id);
-          if (!declaration) {
-            throw this.astErrorOutput(`Unable to find declarator`, ast);
+        if (ast.callee && ast.callee.name) {
+          const functionName = ast.callee.name;
+          this.inferArgumentTypesIfNeeded(functionName, ast.arguments);
+          return this.lookupReturnType(functionName, ast, this);
+        }
+        throw this.astErrorOutput(`Unhandled getType Type "${ ast.type }"`, ast);
+      case 'LogicalExpression':
+        return 'Boolean';
+      case 'BinaryExpression':
+        switch (ast.operator) {
+          case '%':
+          case '/':
+            if (this.fixIntegerDivisionAccuracy) {
+              return 'Number';
+            } else {
+              break;
+            }
+          case '>':
+          case '<':
+            return 'Boolean';
+          case '&':
+          case '|':
+          case '^':
+          case '<<':
+          case '>>':
+          case '>>>':
+            return 'Integer';
+        }
+        const type = this.getType(ast.left);
+        if (this.isState('skip-literal-correction')) return type;
+        if (type === 'LiteralInteger') {
+          const rightType = this.getType(ast.right);
+          if (rightType === 'LiteralInteger') {
+            if (ast.left.value % 1 === 0) {
+              return 'Integer';
+            } else {
+              return 'Float';
+            }
           }
+          return rightType;
+        }
+        return typeLookupMap[type] || type;
+      case 'UpdateExpression':
+        return this.getType(ast.argument);
+      case 'UnaryExpression':
+        if (ast.operator === '~') {
+          return 'Integer';
+        }
+        return this.getType(ast.argument);
+      case 'VariableDeclaration': {
+        const declarations = ast.declarations;
+        let lastType;
+        for (let i = 0; i < declarations.length; i++) {
+          const declaration = declarations[i];
+          lastType = this.getType(declaration);
+        }
+        if (!lastType) {
+          throw this.astErrorOutput(`Unable to find type for declaration`, ast);
+        }
+        return lastType;
+      }
+      case 'VariableDeclarator':
+        const declaration = this.getDeclaration(ast.id);
+        if (!declaration) {
+          throw this.astErrorOutput(`Unable to find declarator`, ast);
+        }
 
-          if (!declaration.valueType) {
-            throw this.astErrorOutput(`Unable to find declarator valueType`, ast);
-          }
+        if (!declaration.valueType) {
+          throw this.astErrorOutput(`Unable to find declarator valueType`, ast);
+        }
 
-          return declaration.valueType;
-        case 'Identifier':
-          if (ast.name === 'Infinity') {
-            return 'Number';
+        return declaration.valueType;
+      case 'Identifier':
+        if (ast.name === 'Infinity') {
+          return 'Number';
+        }
+        if (this.isAstVariable(ast)) {
+          const signature = this.getVariableSignature(ast);
+          if (signature === 'value') {
+            return this.getCheckVariableType(ast);
           }
-          if (this.isAstVariable(ast)) {
-            const signature = this.getVariableSignature(ast);
-            if (signature === 'value') {
-              return this.getCheckVariableType(ast);
-            }
+        }
+        const origin = this.findIdentifierOrigin(ast);
+        if (origin && origin.init) {
+          return this.getType(origin.init);
+        }
+        return null;
+      case 'ReturnStatement':
+        return this.getType(ast.argument);
+      case 'MemberExpression':
+        if (this.isAstMathFunction(ast)) {
+          switch (ast.property.name) {
+            case 'ceil':
+              return 'Integer';
+            case 'floor':
+              return 'Integer';
+            case 'round':
+              return 'Integer';
           }
-          const origin = this.findIdentifierOrigin(ast);
-          if (origin && origin.init) {
-            return this.getType(origin.init);
-          }
-          return null;
-        case 'ReturnStatement':
-          return this.getType(ast.argument);
-        case 'MemberExpression':
-          if (this.isAstMathFunction(ast)) {
-            switch (ast.property.name) {
-              case 'ceil':
-                return 'Integer';
-              case 'floor':
-                return 'Integer';
-              case 'round':
-                return 'Integer';
-            }
-            return 'Number';
-          }
-          if (this.isAstVariable(ast)) {
-            const variableSignature = this.getVariableSignature(ast);
-            switch (variableSignature) {
-              case 'value[]':
-                return this.getLookupType(this.getCheckVariableType(ast.object));
-              case 'value[][]':
-                return this.getLookupType(this.getCheckVariableType(ast.object.object));
-              case 'value[][][]':
-                return this.getLookupType(this.getCheckVariableType(ast.object.object.object));
-              case 'value[][][][]':
-                return this.getLookupType(this.getCheckVariableType(ast.object.object.object.object));
-              case 'value.thread.value':
-              case 'this.thread.value':
-                return 'Integer';
-              case 'this.output.value':
-                return this.dynamicOutput ? 'Integer' : 'LiteralInteger';
-              case 'this.constants.value':
-                return this.getConstantType(ast.property.name);
-              case 'this.constants.value[]':
-                return this.getLookupType(this.getConstantType(ast.object.property.name));
-              case 'this.constants.value[][]':
-                return this.getLookupType(this.getConstantType(ast.object.object.property.name));
-              case 'this.constants.value[][][]':
-                return this.getLookupType(this.getConstantType(ast.object.object.object.property.name));
-              case 'this.constants.value[][][][]':
-                return this.getLookupType(this.getConstantType(ast.object.object.object.object.property.name));
-              case 'fn()[]':
-              case 'fn()[][]':
-              case 'fn()[][][]':
-                return this.getLookupType(this.getType(ast.object));
-              case 'value.value':
-                if (this.isAstMathVariable(ast)) {
-                  return 'Number';
-                }
-                switch (ast.property.name) {
-                  case 'r':
-                  case 'g':
-                  case 'b':
-                  case 'a':
-                    return this.getLookupType(this.getCheckVariableType(ast.object));
-                }
-                case '[][]':
-                  return 'Number';
-            }
-            throw this.astErrorOutput('Unhandled getType MemberExpression', ast);
+          return 'Number';
+        }
+        if (this.isAstVariable(ast)) {
+          const variableSignature = this.getVariableSignature(ast);
+          switch (variableSignature) {
+            case 'value[]':
+              return this.getLookupType(this.getCheckVariableType(ast.object));
+            case 'value[][]':
+              return this.getLookupType(this.getCheckVariableType(ast.object.object));
+            case 'value[][][]':
+              return this.getLookupType(this.getCheckVariableType(ast.object.object.object));
+            case 'value[][][][]':
+              return this.getLookupType(this.getCheckVariableType(ast.object.object.object.object));
+            case 'value.thread.value':
+            case 'this.thread.value':
+              return 'Integer';
+            case 'this.output.value':
+              return this.dynamicOutput ? 'Integer' : 'LiteralInteger';
+            case 'this.constants.value':
+              return this.getConstantType(ast.property.name);
+            case 'this.constants.value[]':
+              return this.getLookupType(this.getConstantType(ast.object.property.name));
+            case 'this.constants.value[][]':
+              return this.getLookupType(this.getConstantType(ast.object.object.property.name));
+            case 'this.constants.value[][][]':
+              return this.getLookupType(this.getConstantType(ast.object.object.object.property.name));
+            case 'this.constants.value[][][][]':
+              return this.getLookupType(this.getConstantType(ast.object.object.object.object.property.name));
+            case 'fn()[]':
+            case 'fn()[][]':
+            case 'fn()[][][]':
+              return this.getLookupType(this.getType(ast.object));
+            case 'value.value':
+              if (this.isAstMathVariable(ast)) {
+                return 'Number';
+              }
+              switch (ast.property.name) {
+                case 'r':
+                case 'g':
+                case 'b':
+                case 'a':
+                  return this.getLookupType(this.getCheckVariableType(ast.object));
+              }
+            case '[][]':
+              return 'Number';
           }
           throw this.astErrorOutput('Unhandled getType MemberExpression', ast);
-        case 'ConditionalExpression':
-          return this.getType(ast.consequent);
-        case 'FunctionDeclaration':
-        case 'FunctionExpression':
-          const lastReturn = this.findLastReturn(ast.body);
-          if (lastReturn) {
-            return this.getType(lastReturn);
-          }
-          return null;
-        case 'IfStatement':
-          return this.getType(ast.consequent);
-        case 'SequenceExpression':
-          return this.getType(ast.expressions[ast.expressions.length - 1]);
-        default:
-          throw this.astErrorOutput(`Unhandled getType Type "${ ast.type }"`, ast);
+        }
+        throw this.astErrorOutput('Unhandled getType MemberExpression', ast);
+      case 'ConditionalExpression':
+        return this.getType(ast.consequent);
+      case 'FunctionDeclaration':
+      case 'FunctionExpression':
+        const lastReturn = this.findLastReturn(ast.body);
+        if (lastReturn) {
+          return this.getType(lastReturn);
+        }
+        return null;
+      case 'IfStatement':
+        return this.getType(ast.consequent);
+      case 'SequenceExpression':
+        return this.getType(ast.expressions[ast.expressions.length - 1]);
+      default:
+        throw this.astErrorOutput(`Unhandled getType Type "${ ast.type }"`, ast);
     }
   }
 
@@ -2692,10 +3279,10 @@ class FunctionNode {
           }
           return dependencies;
         }
-        case 'SequenceExpression':
-          return this.getDependencies(ast.expressions, dependencies, isNotSafe);
-        default:
-          throw this.astErrorOutput(`Unhandled type ${ ast.type } in getDependencies`, ast);
+      case 'SequenceExpression':
+        return this.getDependencies(ast.expressions, dependencies, isNotSafe);
+      default:
+        throw this.astErrorOutput(`Unhandled type ${ ast.type } in getDependencies`, ast);
     }
     return dependencies;
   }
@@ -3131,83 +3718,83 @@ class FunctionNode {
           default:
             throw this.astErrorOutput('Unexpected expression', ast);
         }
-        case 'this.constants.value':
-          if (typeof ast.property.name !== 'string') {
-            throw this.astErrorOutput('Unexpected expression', ast);
-          }
-          name = ast.property.name;
-          type = this.getConstantType(name);
-          if (!type) {
-            throw this.astErrorOutput('Constant has no type', ast);
-          }
-          return {
-            name,
-            type,
-            origin: 'constants',
-              signature: variableSignature,
-          };
-        case 'this.constants.value[]':
-          if (typeof ast.object.property.name !== 'string') {
-            throw this.astErrorOutput('Unexpected expression', ast);
-          }
-          name = ast.object.property.name;
-          type = this.getConstantType(name);
-          if (!type) {
-            throw this.astErrorOutput('Constant has no type', ast);
-          }
-          return {
-            name,
-            type,
-            origin: 'constants',
-              signature: variableSignature,
-              xProperty: ast.property,
-          };
-        case 'this.constants.value[][]': {
-          if (typeof ast.object.object.property.name !== 'string') {
-            throw this.astErrorOutput('Unexpected expression', ast);
-          }
-          name = ast.object.object.property.name;
-          type = this.getConstantType(name);
-          if (!type) {
-            throw this.astErrorOutput('Constant has no type', ast);
-          }
-          return {
-            name,
-            type,
-            origin: 'constants',
-            signature: variableSignature,
-            yProperty: ast.object.property,
-            xProperty: ast.property,
-          };
-        }
-        case 'this.constants.value[][][]': {
-          if (typeof ast.object.object.object.property.name !== 'string') {
-            throw this.astErrorOutput('Unexpected expression', ast);
-          }
-          name = ast.object.object.object.property.name;
-          type = this.getConstantType(name);
-          if (!type) {
-            throw this.astErrorOutput('Constant has no type', ast);
-          }
-          return {
-            name,
-            type,
-            origin: 'constants',
-            signature: variableSignature,
-            zProperty: ast.object.object.property,
-            yProperty: ast.object.property,
-            xProperty: ast.property,
-          };
-        }
-        case 'fn()[]':
-        case 'fn()[][]':
-        case '[][]':
-          return {
-            signature: variableSignature,
-              property: ast.property,
-          };
-        default:
+      case 'this.constants.value':
+        if (typeof ast.property.name !== 'string') {
           throw this.astErrorOutput('Unexpected expression', ast);
+        }
+        name = ast.property.name;
+        type = this.getConstantType(name);
+        if (!type) {
+          throw this.astErrorOutput('Constant has no type', ast);
+        }
+        return {
+          name,
+          type,
+          origin: 'constants',
+            signature: variableSignature,
+        };
+      case 'this.constants.value[]':
+        if (typeof ast.object.property.name !== 'string') {
+          throw this.astErrorOutput('Unexpected expression', ast);
+        }
+        name = ast.object.property.name;
+        type = this.getConstantType(name);
+        if (!type) {
+          throw this.astErrorOutput('Constant has no type', ast);
+        }
+        return {
+          name,
+          type,
+          origin: 'constants',
+            signature: variableSignature,
+            xProperty: ast.property,
+        };
+      case 'this.constants.value[][]': {
+        if (typeof ast.object.object.property.name !== 'string') {
+          throw this.astErrorOutput('Unexpected expression', ast);
+        }
+        name = ast.object.object.property.name;
+        type = this.getConstantType(name);
+        if (!type) {
+          throw this.astErrorOutput('Constant has no type', ast);
+        }
+        return {
+          name,
+          type,
+          origin: 'constants',
+          signature: variableSignature,
+          yProperty: ast.object.property,
+          xProperty: ast.property,
+        };
+      }
+      case 'this.constants.value[][][]': {
+        if (typeof ast.object.object.object.property.name !== 'string') {
+          throw this.astErrorOutput('Unexpected expression', ast);
+        }
+        name = ast.object.object.object.property.name;
+        type = this.getConstantType(name);
+        if (!type) {
+          throw this.astErrorOutput('Constant has no type', ast);
+        }
+        return {
+          name,
+          type,
+          origin: 'constants',
+          signature: variableSignature,
+          zProperty: ast.object.object.property,
+          yProperty: ast.object.property,
+          xProperty: ast.property,
+        };
+      }
+      case 'fn()[]':
+      case 'fn()[][]':
+      case '[][]':
+        return {
+          signature: variableSignature,
+            property: ast.property,
+        };
+      default:
+        throw this.astErrorOutput('Unexpected expression', ast);
     }
   }
 
@@ -4316,10 +4903,10 @@ class GLKernel extends Kernel {
               this.TextureConstructor = GLTextureUnsigned;
               return null;
             }
-            case 'Array(2)':
-            case 'Array(3)':
-            case 'Array(4)':
-              return this.requestFallback(args);
+          case 'Array(2)':
+          case 'Array(3)':
+          case 'Array(4)':
+            return this.requestFallback(args);
         }
       } else {
         if (this.subKernels !== null) {
@@ -4344,10 +4931,10 @@ class GLKernel extends Kernel {
               this.formatValues = utils.erectPackedFloat;
               return null;
             }
-            case 'Array(2)':
-            case 'Array(3)':
-            case 'Array(4)':
-              return this.requestFallback(args);
+          case 'Array(2)':
+          case 'Array(3)':
+          case 'Array(4)':
+            return this.requestFallback(args);
         }
       }
     } else if (this.precision === 'single') {
@@ -5515,7 +6102,6 @@ module.exports = {
   HeadlessGLKernel
 };
 },{"../gl/kernel-string":11,"../web-gl/kernel":104,"gl":1}],34:[function(require,module,exports){
-
 class KernelValue {
   constructor(value, settings) {
     const {
@@ -6170,7 +6756,6 @@ module.exports = {
   Kernel
 };
 },{"../input":109,"../utils":113}],36:[function(require,module,exports){
-
 const fragmentShader = `#version 300 es
 __HEADER__;
 __FLOAT_TACTIC_DECLARATION__;
@@ -7721,13 +8306,13 @@ class WebGL2Kernel extends WebGLKernel {
             } else {
               return gl.R32F;
             }
-            case 'Array(2)':
-              return gl.RG32F;
-            case 'Array(3)': 
-            case 'Array(4)':
-              return gl.RGBA32F;
-            default:
-              throw new Error('Unhandled return type');
+          case 'Array(2)':
+            return gl.RG32F;
+          case 'Array(3)': 
+          case 'Array(4)':
+            return gl.RGBA32F;
+          default:
+            throw new Error('Unhandled return type');
         }
       }
       return gl.RGBA32F;
@@ -8067,7 +8652,6 @@ module.exports = {
   WebGL2Kernel
 };
 },{"../../utils":113,"../function-builder":8,"../web-gl/kernel":104,"./fragment-shader":36,"./function-node":37,"./kernel-value-maps":38,"./vertex-shader":70}],70:[function(require,module,exports){
-
 const vertexShader = `#version 300 es
 __FLOAT_TACTIC_DECLARATION__;
 __INT_TACTIC_DECLARATION__;
@@ -8088,7 +8672,6 @@ module.exports = {
   vertexShader
 };
 },{}],71:[function(require,module,exports){
-
 const fragmentShader = `__HEADER__;
 __FLOAT_TACTIC_DECLARATION__;
 __INT_TACTIC_DECLARATION__;
@@ -9600,34 +10183,34 @@ class WebGLFunctionNode extends FunctionNode {
               return retArr;
           }
         }
-        case 'this.constants.value[]':
-        case 'this.constants.value[][]':
-        case 'this.constants.value[][][]':
-        case 'this.constants.value[][][][]':
-          break;
-        case 'fn()[]':
-          this.astCallExpression(mNode.object, retArr);
-          retArr.push('[');
-          retArr.push(this.memberExpressionPropertyMarkup(property));
-          retArr.push(']');
-          return retArr;
-        case 'fn()[][]':
-          this.astCallExpression(mNode.object.object, retArr);
-          retArr.push('[');
-          retArr.push(this.memberExpressionPropertyMarkup(mNode.object.property));
-          retArr.push(']');
-          retArr.push('[');
-          retArr.push(this.memberExpressionPropertyMarkup(mNode.property));
-          retArr.push(']');
-          return retArr;
-        case '[][]':
-          this.astArrayExpression(mNode.object, retArr);
-          retArr.push('[');
-          retArr.push(this.memberExpressionPropertyMarkup(property));
-          retArr.push(']');
-          return retArr;
-        default:
-          throw this.astErrorOutput('Unexpected expression', mNode);
+      case 'this.constants.value[]':
+      case 'this.constants.value[][]':
+      case 'this.constants.value[][][]':
+      case 'this.constants.value[][][][]':
+        break;
+      case 'fn()[]':
+        this.astCallExpression(mNode.object, retArr);
+        retArr.push('[');
+        retArr.push(this.memberExpressionPropertyMarkup(property));
+        retArr.push(']');
+        return retArr;
+      case 'fn()[][]':
+        this.astCallExpression(mNode.object.object, retArr);
+        retArr.push('[');
+        retArr.push(this.memberExpressionPropertyMarkup(mNode.object.property));
+        retArr.push(']');
+        retArr.push('[');
+        retArr.push(this.memberExpressionPropertyMarkup(mNode.property));
+        retArr.push(']');
+        return retArr;
+      case '[][]':
+        this.astArrayExpression(mNode.object, retArr);
+        retArr.push('[');
+        retArr.push(this.memberExpressionPropertyMarkup(property));
+        retArr.push(']');
+        return retArr;
+      default:
+        throw this.astErrorOutput('Unexpected expression', mNode);
     }
 
     if (mNode.computed === false) {
@@ -12812,7 +13395,6 @@ module.exports = {
   WebGLKernel
 };
 },{"../../plugins/math-random-uniformly-distributed":111,"../../utils":113,"../function-builder":8,"../gl/kernel":12,"../gl/kernel-string":11,"./fragment-shader":71,"./function-node":72,"./kernel-value-maps":73,"./vertex-shader":105}],105:[function(require,module,exports){
-
 const vertexShader = `__FLOAT_TACTIC_DECLARATION__;
 __INT_TACTIC_DECLARATION__;
 __SAMPLER_2D_TACTIC_DECLARATION__;
@@ -13504,7 +14086,6 @@ module.exports = {
   kernelRunShortcut
 };
 },{"./utils":113}],111:[function(require,module,exports){
-
 const source = `// https://www.shadertoy.com/view/4t2SDh
 //note: uniformly distributed, normalized rand, [0,1]
 highp float randomSeedShift = 1.0;
@@ -13546,7 +14127,6 @@ const plugin = {
 
 module.exports = plugin;
 },{}],112:[function(require,module,exports){
-
 class Texture {
   constructor(settings) {
     const {
@@ -14153,95 +14733,95 @@ const utils = {
           } else {
             return `${ast.kind} ${declarations.join(',')}`;
           }
-          case 'VariableDeclarator':
-            if (ast.init.object && ast.init.object.type === 'ThisExpression') {
-              const lookup = thisLookup(ast.init.property.name, true);
-              if (lookup) {
-                return `${ast.id.name} = ${flatten(ast.init)}`;
-              } else {
-                return null;
-              }
-            } else {
+        case 'VariableDeclarator':
+          if (ast.init.object && ast.init.object.type === 'ThisExpression') {
+            const lookup = thisLookup(ast.init.property.name, true);
+            if (lookup) {
               return `${ast.id.name} = ${flatten(ast.init)}`;
+            } else {
+              return null;
             }
-            case 'CallExpression': {
-              if (ast.callee.property.name === 'subarray') {
-                return `${flatten(ast.callee.object)}.${flatten(ast.callee.property)}(${ast.arguments.map(value => flatten(value)).join(', ')})`;
-              }
-              if (ast.callee.object.name === 'gl' || ast.callee.object.name === 'context') {
-                return `${flatten(ast.callee.object)}.${flatten(ast.callee.property)}(${ast.arguments.map(value => flatten(value)).join(', ')})`;
-              }
-              if (ast.callee.object.type === 'ThisExpression') {
-                functionDependencies.push(findDependency('this', ast.callee.property.name));
-                return `${ast.callee.property.name}(${ast.arguments.map(value => flatten(value)).join(', ')})`;
-              } else if (ast.callee.object.name) {
-                const foundSource = findDependency(ast.callee.object.name, ast.callee.property.name);
-                if (foundSource === null) {
-                  return `${ast.callee.object.name}.${ast.callee.property.name}(${ast.arguments.map(value => flatten(value)).join(', ')})`;
-                } else {
-                  functionDependencies.push(foundSource);
-                  return `${ast.callee.property.name}(${ast.arguments.map(value => flatten(value)).join(', ')})`;
-                }
-              } else if (ast.callee.object.type === 'MemberExpression') {
-                return `${flatten(ast.callee.object)}.${ast.callee.property.name}(${ast.arguments.map(value => flatten(value)).join(', ')})`;
-              } else {
-                throw new Error('unknown ast.callee');
-              }
+          } else {
+            return `${ast.id.name} = ${flatten(ast.init)}`;
+          }
+        case 'CallExpression': {
+          if (ast.callee.property.name === 'subarray') {
+            return `${flatten(ast.callee.object)}.${flatten(ast.callee.property)}(${ast.arguments.map(value => flatten(value)).join(', ')})`;
+          }
+          if (ast.callee.object.name === 'gl' || ast.callee.object.name === 'context') {
+            return `${flatten(ast.callee.object)}.${flatten(ast.callee.property)}(${ast.arguments.map(value => flatten(value)).join(', ')})`;
+          }
+          if (ast.callee.object.type === 'ThisExpression') {
+            functionDependencies.push(findDependency('this', ast.callee.property.name));
+            return `${ast.callee.property.name}(${ast.arguments.map(value => flatten(value)).join(', ')})`;
+          } else if (ast.callee.object.name) {
+            const foundSource = findDependency(ast.callee.object.name, ast.callee.property.name);
+            if (foundSource === null) {
+              return `${ast.callee.object.name}.${ast.callee.property.name}(${ast.arguments.map(value => flatten(value)).join(', ')})`;
+            } else {
+              functionDependencies.push(foundSource);
+              return `${ast.callee.property.name}(${ast.arguments.map(value => flatten(value)).join(', ')})`;
             }
-            case 'ReturnStatement':
-              return `return ${flatten(ast.argument)}`;
-            case 'BinaryExpression':
-              return `(${flatten(ast.left)}${ast.operator}${flatten(ast.right)})`;
-            case 'UnaryExpression':
-              if (ast.prefix) {
-                return `${ast.operator} ${flatten(ast.argument)}`;
-              } else {
-                return `${flatten(ast.argument)} ${ast.operator}`;
-              }
-              case 'ExpressionStatement':
-                return `${flatten(ast.expression)}`;
-              case 'SequenceExpression':
-                return `(${flatten(ast.expressions)})`;
-              case 'ArrowFunctionExpression':
-                return `(${ast.params.map(flatten).join(', ')}) => ${flatten(ast.body)}`;
-              case 'Literal':
-                return ast.raw;
-              case 'Identifier':
-                return ast.name;
-              case 'MemberExpression':
-                if (ast.object.type === 'ThisExpression') {
-                  return thisLookup(ast.property.name);
-                }
-                if (ast.computed) {
-                  return `${flatten(ast.object)}[${flatten(ast.property)}]`;
-                }
-                return flatten(ast.object) + '.' + flatten(ast.property);
-              case 'ThisExpression':
-                return 'this';
-              case 'NewExpression':
-                return `new ${flatten(ast.callee)}(${ast.arguments.map(value => flatten(value)).join(', ')})`;
-              case 'ForStatement':
-                return `for (${flatten(ast.init)};${flatten(ast.test)};${flatten(ast.update)}) ${flatten(ast.body)}`;
-              case 'AssignmentExpression':
-                return `${flatten(ast.left)}${ast.operator}${flatten(ast.right)}`;
-              case 'UpdateExpression':
-                return `${flatten(ast.argument)}${ast.operator}`;
-              case 'IfStatement':
-                return `if (${flatten(ast.test)}) ${flatten(ast.consequent)}`;
-              case 'ThrowStatement':
-                return `throw ${flatten(ast.argument)}`;
-              case 'ObjectPattern':
-                return ast.properties.map(flatten).join(', ');
-              case 'ArrayPattern':
-                return ast.elements.map(flatten).join(', ');
-              case 'DebuggerStatement':
-                return 'debugger;';
-              case 'ConditionalExpression':
-                return `${flatten(ast.test)}?${flatten(ast.consequent)}:${flatten(ast.alternate)}`;
-              case 'Property':
-                if (ast.kind === 'init') {
-                  return flatten(ast.key);
-                }
+          } else if (ast.callee.object.type === 'MemberExpression') {
+            return `${flatten(ast.callee.object)}.${ast.callee.property.name}(${ast.arguments.map(value => flatten(value)).join(', ')})`;
+          } else {
+            throw new Error('unknown ast.callee');
+          }
+        }
+        case 'ReturnStatement':
+          return `return ${flatten(ast.argument)}`;
+        case 'BinaryExpression':
+          return `(${flatten(ast.left)}${ast.operator}${flatten(ast.right)})`;
+        case 'UnaryExpression':
+          if (ast.prefix) {
+            return `${ast.operator} ${flatten(ast.argument)}`;
+          } else {
+            return `${flatten(ast.argument)} ${ast.operator}`;
+          }
+        case 'ExpressionStatement':
+          return `${flatten(ast.expression)}`;
+        case 'SequenceExpression':
+          return `(${flatten(ast.expressions)})`;
+        case 'ArrowFunctionExpression':
+          return `(${ast.params.map(flatten).join(', ')}) => ${flatten(ast.body)}`;
+        case 'Literal':
+          return ast.raw;
+        case 'Identifier':
+          return ast.name;
+        case 'MemberExpression':
+          if (ast.object.type === 'ThisExpression') {
+            return thisLookup(ast.property.name);
+          }
+          if (ast.computed) {
+            return `${flatten(ast.object)}[${flatten(ast.property)}]`;
+          }
+          return flatten(ast.object) + '.' + flatten(ast.property);
+        case 'ThisExpression':
+          return 'this';
+        case 'NewExpression':
+          return `new ${flatten(ast.callee)}(${ast.arguments.map(value => flatten(value)).join(', ')})`;
+        case 'ForStatement':
+          return `for (${flatten(ast.init)};${flatten(ast.test)};${flatten(ast.update)}) ${flatten(ast.body)}`;
+        case 'AssignmentExpression':
+          return `${flatten(ast.left)}${ast.operator}${flatten(ast.right)}`;
+        case 'UpdateExpression':
+          return `${flatten(ast.argument)}${ast.operator}`;
+        case 'IfStatement':
+          return `if (${flatten(ast.test)}) ${flatten(ast.consequent)}`;
+        case 'ThrowStatement':
+          return `throw ${flatten(ast.argument)}`;
+        case 'ObjectPattern':
+          return ast.properties.map(flatten).join(', ');
+        case 'ArrayPattern':
+          return ast.elements.map(flatten).join(', ');
+        case 'DebuggerStatement':
+          return 'debugger;';
+        case 'ConditionalExpression':
+          return `${flatten(ast.test)}?${flatten(ast.consequent)}:${flatten(ast.alternate)}`;
+        case 'Property':
+          if (ast.kind === 'init') {
+            return flatten(ast.key);
+          }
       }
       throw new Error(`unhandled ast.type of ${ ast.type }`);
     }

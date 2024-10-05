@@ -1,4 +1,5 @@
 [<img width="100" alt="Logo" src="http://gpu.rocks/static/media/jelly.3587de60.png">](http://gpu.rocks/)
+# important Important Have MinGW and Node-gyp installed
 # GPU.js
 GPU.js is a JavaScript Acceleration library for GPGPU (General purpose computing on GPUs) in JavaScript for Web and Node.
 GPU.js automatically transpiles simple JavaScript functions into shader language and compiles them so they run on your GPU.
